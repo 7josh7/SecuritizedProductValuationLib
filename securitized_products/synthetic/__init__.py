@@ -1,0 +1,1 @@
+"""Synthetic tranche pricing module."""
