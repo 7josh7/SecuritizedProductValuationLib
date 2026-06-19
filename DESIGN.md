@@ -76,7 +76,7 @@ For constant hazard `Q(t) = 1 − e^(−λt)`:
 Sanity: low `Y_i` (weak credit) → low `U_i` → small `τ_i` → **early default**. (The earlier draft's `−ln(U)/λ` inverted this and is a bug; this is the corrected form.) Default within horizon `T` iff `τ_i ≤ T`, equivalently `U_i ≤ Q_i(T)`.
 
 ### 2.2 Default curve (term structure)
-Cumulative default probability `Q(t)` calibrated from a rating-keyed table. The engine **selects the cumulative rate at the portfolio's horizon** (5y here), not the 1y rate — the exact judgment Task 3 warns about. Convert to hazard via `Q(t) = 1 − e^(−λt)`, or carry a piecewise-constant hazard for a full curve.
+Cumulative default probability `Q(t)` calibrated from a rating-keyed table. The engine **selects the cumulative rate at the portfolio's horizon** (5y here), not the 1y rate — the exact judgment Task 3 warns about. Convert to hazard via `Q(t) = 1 − e^(−λt)`, or carry a piecewise-constant hazard for a full curve. Note that the geometric annual model and the constant-hazard form are identical under λ = −ln(1−p_annual).
 
 ### 2.3 Recovery / LGD
 - v1 default: constant LGD = 60% (matches spec), configurable.
