@@ -1,293 +1,284 @@
-﻿# SecuritizedProductValuationLib Timeline
+# SecuritizedProductValuationLib Timeline
 
-Assumption: one primary developer, starting Monday, June 22, 2026. The core cash-CDO engine and agent MVP are planned as an 8-week build. Synthetic/base-correlation work is deferred to a later phase.
+Assumption: one primary developer, starting Monday, June 22, 2026. The academic
+cash-CDO exercise is still a milestone, but the target release is now a full
+institutional cash CDO/CLO model with auditable waterfalls, reinvestment,
+coverage tests, valuation, stress analytics, and trustee-report tie-out.
 
-## Primary Build Plan
-
-| Week | Dates | Milestone | Deliverables |
-|---|---:|---|---|
-| 1 | Jun 22-26 | Project scaffold and core schemas | Buildable package skeleton, typed configs/results, reproducibility conventions |
-| 2 | Jun 29-Jul 3 | Academic engine MVP | Copula sampling, default-time generation, flat curve, constant LGD, collateral cash flows |
-| 3 | Jul 6-10 | Simple waterfall and metrics | Class A/B/equity waterfall, tranche PD/EL, academic Task 1-4 reproduction |
-| 4 | Jul 13-17 | Testing hardening | Golden tests, analytical edge cases, MC standard errors, reproducibility tests |
-| 5 | Jul 20-24 | Realistic cash structure | Term-structure PD curve, stochastic recovery, OC/IC triggers, shortfalls, paydowns |
-| 6 | Jul 27-31 | Valuation and rating views | Discounting, tranche values, ROE/IRR, academic rating mode, agency-style approximation outputs |
-| 7 | Aug 3-7 | Agent layer | Engine tool wrappers, Task-3 notional solver, data retrieval stub/cache, scenario runner |
-| 8 | Aug 10-14 | Reporting and final validation | Report generation, scenario summaries, final tests, README, example notebook |
-
-## Detailed Weekly Tasks
-
-### Week 1: Project Scaffold and Core Schemas
-
-**Goal:** Create a clean, testable Python package foundation before implementing model logic.
-
-**Tasks:**
-
-1. Create `pyproject.toml` with package metadata, Python version, dependencies, and test tooling.
-2. Create the package layout under `securitized_products/`, `securitized_products/core/`, `securitized_products/cdo/`, and `agent/`.
-3. Define core config dataclasses:
-   - `DealConfig`
-   - `BondConfig`
-   - `TrancheConfig`
-   - `SimulationConfig`
-4. Define typed result schemas:
-   - `SimulationResult`
-   - `ScenarioCashflows`
-   - `WaterfallTrace`
-   - `TrancheMetrics`
-   - `ValuationResult`
-   - `RatingResult`
-5. Add package-level constants for time units, coupon frequency, and default conventions.
-6. Add seed-management utilities so every simulation is reproducible.
-7. Add a minimal test suite structure under `tests/`.
-8. Add a smoke test that imports the package and instantiates the main config objects.
-9. Add a short README section explaining how to install and run tests.
-
-**Acceptance criteria:**
-
-- `pip install -e .` works.
-- `pytest` runs at least one passing smoke test.
-- Config and result objects can be imported without circular dependencies.
-- No valuation math is implemented in the agent layer.
-
-### Week 2: Academic Engine MVP
-
-**Goal:** Implement the deterministic academic engine pieces needed for the mini-project baseline.
-
-**Tasks:**
-
-1. Implement one-factor Gaussian copula sampling in `securitized_products/core/copula.py`.
-2. Convert target latent correlation `rho` into factor loading `a = sqrt(rho)`.
-3. Generate systemic factor `M` and idiosyncratic factors `Z_i` with a fixed seed.
-4. Convert latent variables into uniform default drivers using `U_i = Phi(Y_i)`.
-5. Implement constant-hazard default curve logic in `default_curve.py`.
-6. Implement default-time sampling using `tau_i = -ln(1 - U_i) / lambda_i`.
-7. Implement constant recovery and LGD in `recovery.py`.
-8. Implement quarterly collateral cash-flow generation in `cdo/cashflows.py`.
-9. Track per-name status by quarter: alive, defaulted this period, recovered, matured.
-10. Return deterministic typed outputs rather than loose dictionaries.
-11. Add tests for marginal default probability and default-time orientation.
-
-**Acceptance criteria:**
-
-- Simulated default frequency converges toward the configured cumulative default probability.
-- Low `U_i` produces earlier default times, not later default times.
-- Collateral coupons, recoveries, and principal repayment are produced on the quarterly grid.
-- Academic assumptions can be represented: flat curve, constant LGD, no OC/IC triggers.
-
-### Week 3: Simple Waterfall and Tranche Metrics
-
-**Goal:** Reproduce the academic senior/mezzanine/equity structure and compute headline tranche risk metrics.
-
-**Tasks:**
-
-1. Implement the baseline waterfall in `cdo/waterfall.py`:
-   - pay Class A interest
-   - pay Class B interest
-   - send residual to equity
-2. Track cash paid to each tranche by quarter.
-3. Track interest shortfalls even if the academic baseline does not use carryforward.
-4. Implement tranche loss allocation in reverse seniority:
-   - equity first
-   - Class B second
-   - Class A last
-5. Implement expected loss in `cdo/metrics.py`.
-6. Implement probability of principal loss in `cdo/metrics.py`.
-7. Implement undiscounted tranche loss metrics required by the academic assignment.
-8. Build an academic example configuration matching the mini-project inputs.
-9. Add a notebook or script that runs Tasks 1-4 end to end.
-10. Compare outputs against hand-computed small cases.
-
-**Acceptance criteria:**
-
-- A full academic run produces Class A, Class B, and equity cash-flow outputs.
-- Expected loss and probability of loss are reported for each tranche.
-- Loss allocation obeys tranche seniority in every tested scenario.
-- A simple hand-computed portfolio matches the engine output exactly.
-
-### Week 4: Testing Hardening
-
-**Goal:** Turn the academic MVP into a reliable tested engine rather than a one-off script.
-
-**Tasks:**
-
-1. Add golden regression tests for the academic mini-project configuration.
-2. Add analytical edge-case tests:
-   - 0% default probability
-   - 100% default probability with zero recovery
-   - 0% LGD
-   - single-name portfolio
-   - zero correlation
-3. Add copula tests for latent correlation convergence.
-4. Add marginal default tests at multiple horizons.
-5. Add joint default probability checks against the bivariate-normal result.
-6. Add Monte Carlo standard error calculations.
-7. Add confidence intervals to headline metrics.
-8. Add seed reproducibility tests.
-9. Add tests proving the same seed gives the same outputs.
-10. Add tests proving different seeds change scenario draws but preserve aggregate calibration.
-11. Clean up API names and module boundaries before expanding features.
-
-**Acceptance criteria:**
-
-- `pytest` passes for all academic and analytical tests.
-- Every headline Monte Carlo metric includes scenario count, seed, standard error, and confidence interval.
-- The academic implementation is stable enough to use as a golden regression baseline.
-- Release `v0.1` can be tagged at the end of this week.
-
-### Week 5: Realistic Cash Structure
-
-**Goal:** Extend the academic model into a more realistic cash-CDO/CLO cash-flow engine.
-
-**Tasks:**
-
-1. Implement rating-keyed cumulative default tables under `data/default_rates/`.
-2. Implement horizon selection for default curves.
-3. Implement piecewise-constant hazard curves.
-4. Implement stochastic recovery using a beta distribution.
-5. Add recovery configuration for mean and concentration.
-6. Implement OC test calculation.
-7. Implement IC test calculation.
-8. Implement trigger breach states in `WaterfallTrace`.
-9. Implement diversion of residual cash to senior principal when OC/IC tests fail.
-10. Implement senior principal paydown schedules.
-11. Implement interest shortfall tracking and optional carryforward.
-12. Add unit tests for trigger breach, cure, and paydown behavior.
-13. Add side-by-side mode: academic triggers off vs. industry triggers on.
-
-**Acceptance criteria:**
-
-- Term-structure default curves replace flat default assumptions when configured.
-- Stochastic recovery runs reproducibly under a fixed seed.
-- OC/IC breach and cure behavior is visible in the waterfall trace.
-- Turning triggers off reproduces the academic baseline.
-
-### Week 6: Valuation and Rating Views
-
-**Goal:** Add valuation, return, and transparent rating-style diagnostics on top of the cash-flow engine.
-
-**Tasks:**
-
-1. Implement discount-factor utilities in `core/curves.py`.
-2. Add flat-rate discounting for initial v1 valuation.
-3. Add Class A valuation at risk-free plus 50 bp.
-4. Add Class B valuation at Treasury plus 400 bp.
-5. Add equity residual valuation.
-6. Implement equity IRR calculation.
-7. Implement simple and net ROE reporting.
-8. Implement academic rating mode in `cdo/rating.py`.
-9. Implement Class A notional solver for the academic Aa threshold.
-10. Use common random numbers inside the notional solver to reduce simulation noise.
-11. Implement agency-style approximation outputs:
-    - expected loss
-    - probability of principal loss
-    - probability of impairment
-    - WAL
-    - trigger breach frequency
-    - shortfall frequency
-12. Add tests for discounting, IRR, and rating-threshold behavior.
-
-**Acceptance criteria:**
-
-- Tranche values are reported with explicit discount assumptions.
-- Equity IRR and ROE are labeled clearly.
-- Academic rating mode can solve for the maximum Class A notional under the threshold.
-- Agency-style outputs are clearly labeled as approximations, not proprietary ratings.
-
-### Week 7: Agent Layer
-
-**Goal:** Build the thin agent layer that orchestrates the deterministic engine without touching the math.
-
-**Tasks:**
-
-1. Implement typed engine wrappers in `agent/tools.py`.
-2. Expose only validated engine inputs and typed result objects.
-3. Implement Task-3 notional bisection orchestration in `agent/solvers.py`.
-4. Implement default-rate table loading in `agent/retrieval.py`.
-5. Implement horizon-selection logic for default-rate tables.
-6. Implement scenario definitions in `agent/scenarios.py`.
-7. Add scenario sweeps for correlation, recovery, default curve, and OC/IC triggers.
-8. Implement report data assembly in `agent/report.py`.
-9. Add checks ensuring agent code does not perform valuation arithmetic directly.
-10. Add integration tests where the agent calls the engine and receives typed outputs.
-
-**Acceptance criteria:**
-
-- The agent can run the academic notional solver by calling engine functions.
-- The agent can run a scenario sweep and collect typed results.
-- The agent never applies the waterfall, discounts cash flows, or calculates losses itself.
-- Agent outputs are reproducible when engine seeds are fixed.
-
-### Week 8: Reporting and Final Validation
-
-**Goal:** Package the project into a usable portfolio/research artifact.
-
-**Tasks:**
-
-1. Implement Markdown report generation.
-2. Add optional Word/PDF export hooks if needed later.
-3. Generate summary tables for tranche metrics, valuation, ROE, and rating diagnostics.
-4. Generate scenario comparison tables.
-5. Add charts for loss distribution, tranche losses, trigger breaches, and equity cash flows.
-6. Create `notebooks/academic_spec_walkthrough.ipynb`.
-7. Create a README with install, usage, model assumptions, and limitations.
-8. Add a command-line entrypoint or example script for running the standard deal.
-9. Run full test suite.
-10. Review math against `MATH.md` and architecture against `DESIGN.md`.
-11. Clean up naming, comments, and public API exports.
-12. Prepare `v1.0` release notes.
-
-**Acceptance criteria:**
-
-- A user can install the package, run the example, and generate a report.
-- README explains what the model does and does not claim to do.
-- The final output clearly separates academic baseline results from industry-style extensions.
-- Release `v1.0` can be tagged at the end of this week.
+The plan is intentionally longer than the earlier v1 plan. An institutional
+model needs schemas, controls, validation, and reconciliation before it is useful
+or credible.
 
 ## Release Targets
 
 | Target | Timing | Scope |
 |---|---:|---|
-| v0.1 | End of Week 4 | Academic cash-CDO engine working, tested, and able to reproduce the assignment outputs |
-| v1.0 | End of Week 8 | Realistic cash-CDO engine with agent orchestration, scenario runs, reports, and documentation |
+| v0.1 | End of Week 4 | Academic regression engine: default times, basic cash flows, simple waterfall, EL/PPL |
+| v0.3 | End of Week 8 | Institutional data model, schedules, curves, collateral projection, proceeds accounts |
+| v0.5 | End of Week 12 | Liability stack, fees, reserves, OC/IC, collateral-quality tests, configurable waterfalls |
+| v0.7 | End of Week 16 | Reinvestment, trading, recovery lags, valuation, stress, break-even analytics |
+| v0.9 | End of Week 20 | Trustee-report tie-out, Excel review workbook, validation hardening |
+| v1.0 | End of Week 22 | Documented institutional cash CDO/CLO release |
+| v1.1+ | Deferred | Synthetic/base-correlation module and market calibration examples |
 
-## Deferred Phase
+## Primary Build Plan
 
-### Week 9: QuantLib Cross-Check
+| Week | Dates | Milestone | Deliverables |
+|---|---:|---|---|
+| 1 | Jun 22-26 | Project scaffold and schemas | Package skeleton, typed configs/results, validation scaffolding |
+| 2 | Jun 29-Jul 3 | Credit core | Copula, default curves, default times, recovery primitives |
+| 3 | Jul 6-10 | Academic cash-flow profile | Static collateral, simple waterfall, tranche metrics |
+| 4 | Jul 13-17 | Academic hardening | Golden regression, edge cases, MC errors, reproducibility |
+| 5 | Jul 20-24 | Institutional schedules and curves | Calendars, day counts, payment schedules, benchmark/discount curves |
+| 6 | Jul 27-31 | Loan-level collateral engine | Interest, amortization, prepayment, sales, purchases, par roll-forward |
+| 7 | Aug 3-7 | Proceeds accounts | Interest/principal buckets, reserves, account transfers, source/use checks |
+| 8 | Aug 10-14 | Market and collateral data normalization | Collateral tape schema, prices, ratings, eligibility flags, scenario inputs |
+| 9 | Aug 17-21 | Liability stack | Notes, fees, expenses, hedges, reserves, note balance roll-forward |
+| 10 | Aug 24-28 | Coverage tests | ACPA, class-specific OC/IC, WARF, WAS, WAL, concentration tests |
+| 11 | Aug 31-Sep 4 | Configurable waterfalls | Interest, principal, diversion, post-reinvestment, special proceeds |
+| 12 | Sep 7-11 | Waterfall validation | Hand-computed deal cases, breach/cure, shortfalls, cash controls |
+| 13 | Sep 14-18 | Reinvestment engine | Eligibility, purchases, blocked reinvestment, par build/loss |
+| 14 | Sep 21-25 | Trading and workout assets | Sales, credit risk/improved sales, defaulted asset treatment, recovery lags |
+| 15 | Sep 28-Oct 2 | Valuation | PV, clean/dirty price, yield, DM, OAS, accrued, duration |
+| 16 | Oct 5-9 | Stress and break-even analytics | Rating-style scenarios, break-even CDR/recovery/spread, scenario comparison |
+| 17 | Oct 12-16 | Agent layer | Typed engine wrappers, retrieval, normalization, scenario orchestration |
+| 18 | Oct 19-23 | Reporting | Markdown/Excel reports, charts, validation summaries |
+| 19 | Oct 26-30 | Trustee tie-out | Actual-period reconciliation, tolerance controls, difference reports |
+| 20 | Nov 2-6 | Performance and QA | Vectorization, large scenario runs, property tests, audit review |
+| 21 | Nov 9-13 | Documentation and examples | README, institutional example, academic walkthrough, model limitations |
+| 22 | Nov 16-20 | v1.0 release | Full test pass, release notes, package cleanup |
+
+## Detailed Phases
+
+### Phase 1 - Academic Regression Core (Weeks 1-4)
+
+**Goal:** Preserve the original coursework as a small, deterministic regression
+profile while building foundations that can scale.
 
 **Tasks:**
 
-1. Build a simplified synthetic/default-loss setup that can be compared with QuantLib.
-2. Match portfolio assumptions between the internal engine and QuantLib as closely as possible.
-3. Compare loss distributions and tranche loss metrics.
-4. Document what QuantLib validates and what it does not validate.
-5. Keep cash waterfall validation separate because QuantLib does not model the deal-specific OC/IC waterfall.
+1. Create `pyproject.toml`, package metadata, dependencies, and test tooling.
+2. Create package layout under `securitized_products/core`,
+   `securitized_products/cdo`, `securitized_products/synthetic`, and `agent`.
+3. Define input schemas:
+   - `DealConfig`
+   - `ScheduleConfig`
+   - `AssetConfig`
+   - `CollateralPoolConfig`
+   - `TrancheConfig`
+   - `SimulationConfig`
+   - `ScenarioConfig`
+4. Define output schemas:
+   - `AssetCashflowTable`
+   - `WaterfallTrace`
+   - `TrancheCashflowTable`
+   - `TrancheMetrics`
+   - `ValidationReport`
+5. Implement one-factor Gaussian copula and default-time sampling.
+6. Implement constant and piecewise-constant hazard curves.
+7. Implement constant recovery and beta recovery primitives.
+8. Implement static quarterly collateral cash flows.
+9. Implement the simple academic A/B/equity waterfall.
+10. Implement EL, probability of principal loss, and basic valuation hooks.
+11. Add golden regression tests and analytical edge cases.
+12. Add MC standard errors, seed reproducibility, and confidence intervals.
 
-### Weeks 10-11: Synthetic CDO and Base Correlation
+**Acceptance criteria:**
+
+- Academic profile reproduces the original simple structure.
+- Low default driver values produce earlier default times.
+- Every headline Monte Carlo output includes seed, scenario count, standard
+  error, and confidence interval.
+- Agent package contains no valuation arithmetic.
+
+### Phase 2 - Institutional Foundations (Weeks 5-8)
+
+**Goal:** Build the time, curve, collateral, and proceeds infrastructure needed
+for a real cash-flow model.
 
 **Tasks:**
 
-1. Create a separate synthetic module under `securitized_products/synthetic/`.
-2. Implement attachment/detachment tranche loss functions.
-3. Add index-tranche quote input structures.
-4. Implement base-correlation calibration routines.
-5. Add interpolation/extrapolation controls for the base-correlation curve.
-6. Add tests using simplified synthetic examples.
-7. Document why this module is separate from the cash CDO/CLO engine.
+1. Implement calendars, business-day adjustment, payment schedules, accrual
+   periods, and day-count conventions.
+2. Implement benchmark forward curves and discount curves.
+3. Add fixed-rate, floating-rate, floor, and fallback coupon logic.
+4. Implement loan-level interest, scheduled amortization, maturity principal,
+   repayments, CPR/SMM prepayments, sale proceeds, purchases, and par rolls.
+5. Add defaulted asset state and recovery lag scheduling.
+6. Implement proceeds classification:
+   - interest proceeds
+   - principal proceeds
+   - hedge proceeds
+   - workout proceeds
+   - reserve releases
+7. Implement account roll-forwards for collection, payment, reserve, and
+   uninvested cash accounts.
+8. Add hard source/use validation for each account.
+9. Define collateral tape normalization schema with prices, ratings, industries,
+   countries, spreads, floors, maturities, flags, and eligibility fields.
+10. Add deterministic scenario inputs for default, recovery, prepayment, rates,
+   spreads, reinvestment, and sales.
 
-### Week 12: Calibration Examples and Cleanup
+**Acceptance criteria:**
+
+- Collateral par roll-forward balances every period.
+- Account source/use reconciliations balance every period.
+- The same loan can be represented as fixed, floating, amortizing, bullet,
+  sold, defaulted, recovered, or reinvested.
+- Proceeds classification is configured, not hard-coded inside waterfalls.
+
+### Phase 3 - Tests, Liabilities, and Waterfalls (Weeks 9-12)
+
+**Goal:** Model the liability side and deal structural protections with
+indenture-style configurability.
 
 **Tasks:**
 
-1. Add calibration examples for synthetic tranches.
-2. Add documentation for assumptions, limitations, and expected inputs.
-3. Add notebook examples for synthetic pricing.
-4. Clean up public APIs.
-5. Run final tests and prepare optional `v1.1` release notes.
+1. Implement note stack with seniority, coupons, balances, deferrability, and
+   interest shortfalls.
+2. Implement senior expenses, trustee/admin fees, management fees, incentive
+   fees, taxes, hedge payments, and reserve deposits/releases.
+3. Implement note balance roll-forward with principal payments, writedowns, and
+   writeups.
+4. Implement adjusted collateral principal amount with component haircuts:
+   - defaulted assets
+   - CCC/Caa excess
+   - discount obligations
+   - long-dated assets
+   - ineligible collateral
+   - eligible cash
+5. Implement class-specific OC tests.
+6. Implement class-specific IC tests.
+7. Implement collateral-quality tests:
+   - WARF
+   - WAS
+   - WAL
+   - diversity/concentration
+   - CCC/Caa excess
+   - cov-lite
+   - fixed-rate and second-lien buckets
+8. Implement data-driven waterfall line items.
+9. Build interest, principal, diversion, and post-reinvestment waterfalls.
+10. Add unit tests for OC/IC breach and cure, diversion, deferred interest,
+    fee carryforward, and post-reinvestment sequential paydown.
+
+**Acceptance criteria:**
+
+- No waterfall logic is hard-coded to only Class A/B/equity.
+- Every test result exposes numerator, denominator, threshold, ratio, pass/fail,
+  shortfall/excess, and cure amount.
+- Every waterfall line exposes due, paid, shortfall, carryforward, available cash
+  after payment, and balance update.
+- Cash and note balance controls pass for hand-computed examples.
+
+### Phase 4 - Reinvestment, Trading, Valuation, and Stress (Weeks 13-16)
+
+**Goal:** Add the features that materially change CLO economics and investor
+analytics.
+
+**Tasks:**
+
+1. Implement reinvestment eligibility gates:
+   - reinvestment period
+   - event of default/acceleration blocks
+   - reinvestment OC/par tests
+   - collateral-quality tests
+   - concentration tests
+   - asset eligibility
+2. Implement purchase of reinvestment assets at scenario price/spread/rating.
+3. Implement discretionary, credit risk, and credit improved sales.
+4. Track par build, par erosion, and trading gain/loss.
+5. Implement recovery lag, workout assets, and sale/hold treatment for defaults.
+6. Implement PV, clean/dirty price, accrued interest, yield, discount margin,
+   OAS, duration, WAL, equity IRR, MOIC, and NPV.
+7. Implement deterministic rating-style stress scenario sets.
+8. Implement break-even solvers for CDR, cumulative default rate, recovery,
+   spread compression, prepayment speed, and reinvestment price.
+9. Implement Monte Carlo scenario comparison with common random numbers.
+
+**Acceptance criteria:**
+
+- Reinvestment can be allowed, blocked, or partially constrained based on tests.
+- Trading affects cash, par, market value, and tests separately.
+- Valuation outputs state cash-flow basis, curve, spread, clean/dirty treatment,
+  accrued interest, and scenario mode.
+- Break-even solvers use deterministic engine calls and report convergence.
+
+### Phase 5 - Agent, Reporting, and Trustee Tie-Out (Weeks 17-20)
+
+**Goal:** Make the model usable without weakening the engine boundary.
+
+**Tasks:**
+
+1. Implement typed engine wrappers in `agent/tools.py`.
+2. Implement file and data retrieval in `agent/retrieval.py`.
+3. Implement collateral tape, trustee report, curve, and rating normalization.
+4. Implement scenario builders in `agent/scenarios.py`.
+5. Implement deterministic solver orchestration in `agent/solvers.py`.
+6. Add guards proving agent code does not perform valuation arithmetic.
+7. Generate Markdown and Excel review workbooks.
+8. Add charts for collateral balances, note balances, OC/IC ratios, test
+   failures, waterfall uses, loss distributions, tranche values, and equity IRR.
+9. Implement trustee-report tie-out mode:
+   - actual collateral balances
+   - note balances
+   - interest/principal proceeds
+   - waterfall line items
+   - OC/IC ratios
+   - cash differences by tolerance
+10. Add performance profiling and large-run QA.
+
+**Acceptance criteria:**
+
+- Agent can run institutional scenarios only through typed engine calls.
+- Reports include validation results and do not hide failed hard controls.
+- Trustee tie-out produces a line-item difference report.
+- Excel review workbook is sufficient for an analyst to audit major outputs.
+
+### Phase 6 - Documentation and Release (Weeks 21-22)
+
+**Goal:** Ship a documented institutional model with honest limits.
+
+**Tasks:**
+
+1. Write README install and quickstart instructions.
+2. Add academic walkthrough.
+3. Add institutional example with synthetic sample collateral.
+4. Document all major assumptions and unsupported structures.
+5. Document public references and non-proprietary rating diagnostic limits.
+6. Run full test suite and performance checks.
+7. Clean public APIs.
+8. Prepare v1.0 release notes.
+
+**Acceptance criteria:**
+
+- A user can run the academic profile and institutional example.
+- The model refuses or flags incomplete deal terms that would make outputs
+  unreliable.
+- Documentation clearly separates valuation, stress diagnostics, and rating
+  claims.
+
+## Deferred Phase - Synthetic CDO and Base Correlation
+
+Synthetic/base-correlation work remains separate from the cash CDO/CLO engine.
+
+**Tasks:**
+
+1. Build a synthetic portfolio loss distribution module.
+2. Implement attachment/detachment tranche losses.
+3. Add standardized index-tranche quote structures.
+4. Implement base-correlation calibration.
+5. Add interpolation/extrapolation controls.
+6. Cross-check simplified cases against QuantLib.
+7. Document why this module does not drive cash CLO waterfalls.
 
 ## Notes
 
-- The agent is built after the deterministic engine is stable.
-- The academic mini-project remains a golden regression test.
-- Synthetic/base-correlation pricing is intentionally separate from the v1 cash-flow engine.
-- Every task that produces numbers must be traceable back to deterministic engine output.
+- The academic mini-project remains a golden regression profile.
+- Institutional release quality depends on reconciliation and validation, not
+  just formulas.
+- Cash waterfall validation is hand-computed and trustee-report based.
+- QuantLib is useful for calendars, curves, and simplified synthetic checks, not
+  for deal-specific cash waterfall allocation.
+- Every output must identify model version, scenario set, inputs, and validation
+  status.

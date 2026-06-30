@@ -1,107 +1,252 @@
-﻿# SecuritizedProductValuationLib Math Specification
+# SecuritizedProductValuationLib Math Specification
 
-This file is the quantitative contract for the first product module: a cash CDO/CLO valuation engine. The implementation should be deterministic given its inputs and random seed. The agent layer may select inputs, run scenarios, and explain results, but it must not perform valuation arithmetic.
+This file is the quantitative contract for the first institutional cash CDO/CLO
+model in `SecuritizedProductValuationLib`. The model is a deterministic,
+auditable engine given its inputs, market data, scenario definitions, and random
+seed. The agent layer may select inputs, run scenarios, and explain results, but
+it must not perform valuation arithmetic.
+
+The academic mini-project remains a special configuration:
+
+```text
+static collateral pool
+quarterly grid
+flat default probability
+constant recovery
+no fees
+no reinvestment
+no collateral-quality tests
+single senior/mezz/equity waterfall
+```
+
+The institutional model generalizes that case into a trustee-style and
+rating-diagnostic cash-flow engine. It does not claim to reproduce proprietary
+Moody's, S&P, Fitch, KBRA, Intex, Bloomberg, or CDONet outputs unless explicitly
+calibrated and reconciled to a deal, trustee report, and methodology version.
 
 GitHub renders the formulas in this document as LaTeX math.
 
-## 1. Notation
+## 1. Modeling Standard
+
+The model must satisfy five institutional requirements.
+
+1. **Indenture fidelity.** Every cash movement is driven by configured deal terms:
+   dates, accounts, proceeds definitions, fees, note coupons, coverage tests,
+   collateral-quality tests, reinvestment rules, and priority of payments.
+2. **Separate generation and allocation.** Collateral cash-flow generation is
+   independent from waterfall allocation. No collateral engine function may know
+   tranche seniority, and no waterfall function may synthesize collateral cash.
+3. **Separate proceeds accounts.** Interest proceeds, principal proceeds,
+   trading proceeds, recoveries, workout proceeds, reserve releases, and amounts
+   permitted to cross between accounts are tracked explicitly.
+4. **Auditability.** Every period has source/use reconciliations, balance
+   roll-forwards, test numerator/denominator detail, line-item shortfalls, and
+   reproducible scenario metadata.
+5. **Mode transparency.** The engine supports base-case valuation, deterministic
+   rating stresses, stochastic Monte Carlo risk metrics, break-even analysis, and
+   historical/trustee-report tie-out as separate modes.
+
+## 2. Notation
 
 | Symbol | Meaning |
 |---|---|
-| $i$ | Obligor or collateral bond index |
-| $j$ | Tranche index |
-| $q$ | Payment period index, usually quarterly |
+| $i$ | Collateral asset or obligor index |
+| $j$ | Liability tranche index |
+| $q$ | Payment period index |
+| $m$ | Collateral projection period index, often monthly |
 | $t$ | Time in years |
-| $T$ | Deal horizon or maturity |
-| $F_i$ | Face value of collateral bond $i$ |
-| $c_i$ | Annual coupon rate of collateral bond $i$ |
-| $N_j$ | Tranche notional for tranche $j$ |
-| $r_j$ | Annual coupon/spread rate for tranche $j$ |
-| $Q_i(t)$ | Cumulative default probability for name $i$ by time $t$ |
+| $T$ | Deal horizon or legal final maturity |
+| $F_{i,t}$ | Asset par or funded balance |
+| $UPB_{i,t}$ | Unpaid principal balance |
+| $P_i$ | Purchase price as percent of par |
+| $S_i$ | Sale price as percent of par |
+| $s_i$ | Asset spread over benchmark |
+| $f_i$ | Asset index floor |
+| $c_i(t)$ | Asset coupon rate |
+| $N_{j,t}$ | Tranche notional outstanding |
+| $r_j(t)$ | Tranche coupon rate |
+| $Q_i(t)$ | Cumulative default probability for name $i$ |
 | $\lambda_i(t)$ | Hazard rate for name $i$ |
-| $R_i$ | Recovery rate on name $i$ |
-| $\mathrm{LGD}_i$ | Loss given default, $1 - R_i$ |
-| $\tau_i$ | Default time of name $i$ |
+| $R_i$ | Recovery rate |
+| $LGD_i$ | Loss given default, $1 - R_i$ |
+| $\tau_i$ | Default time |
+| $\ell_i$ | Recovery lag |
 | $\rho$ | Pairwise latent asset correlation |
 | $a$ | One-factor loading, where $\rho = a^2$ |
-| $M$ | Common systematic factor |
-| $Z_i$ | Idiosyncratic factor for name $i$ |
-| $Y_i$ | Latent asset variable for name $i$ |
+| $M$ | Systematic factor |
+| $Z_i$ | Idiosyncratic factor |
+| $Y_i$ | Latent asset variable |
+| $DF(t)$ | Discount factor to time $t$ |
+| $IP_q$ | Interest proceeds available on payment date $q$ |
+| $PP_q$ | Principal proceeds available on payment date $q$ |
+| $ACPA_q$ | Adjusted collateral principal amount |
+| $OC_{k,q}$ | Overcollateralization ratio for test class $k$ |
+| $IC_{k,q}$ | Interest coverage ratio for test class $k$ |
 
-The baseline academic setup uses a 5-year horizon, 20 quarterly periods, flat annual default probability, constant LGD, and a simple senior/mezzanine/equity waterfall. The industry-grade setup generalizes those assumptions.
+## 3. Time Grid, Calendars, and Accrual
 
-## 2. Time Grid and Cash-Flow Dates
+The engine supports two grids:
 
-For a quarterly structure with maturity $T = 5$, define:
+```text
+collateral projection grid: monthly or asset-event dates
+liability payment grid: usually quarterly
+```
 
-$$
-\Delta = 0.25
-$$
-
-$$
-t_q = q\Delta,\qquad q = 1,2,\ldots,20
-$$
-
-Coupon cash flows are paid at each $t_q$. Principal is repaid at maturity unless a bond has defaulted before maturity. A bond that defaults in period $q$ stops paying future coupons and contributes a recovery cash flow according to the configured recovery timing convention.
-
-The default recovery convention proposed for v1 is:
-
-$$
-\operatorname{recovery\_period}(\tau_i)
-= \min \{q : t_{q-1} < \tau_i \le t_q\}
-$$
-
-Recovery cash is recognized in that period.
-
-## 3. One-Factor Gaussian Copula
-
-Each obligor has a latent asset variable:
+Let payment dates be $D_q$ and previous payment dates be $D_{q-1}$. The year
+fraction for a cash-flow item is:
 
 $$
-Y_i = aM + \sqrt{1-a^2}\,Z_i
+\Delta_{x,q} = \operatorname{DCF}(D_{q-1}, D_q; \operatorname{daycount}_x)
+$$
+
+where $x$ can be an asset, tranche, fee, hedge, or reserve account. Business-day
+adjustment, holiday calendar, end-of-month behavior, payment delays, and reset
+dates are part of `DealConfig`.
+
+Required date fields:
+
+```text
+closing_date
+effective_date
+first_payment_date
+payment_dates
+reinvestment_period_end
+non_call_period_end
+weighted_average_life_test_date
+stated_maturity
+legal_final_maturity
+optional_redemption_dates
+```
+
+The academic mode may collapse this to:
+
+$$
+\Delta = 0.25,\qquad t_q = q\Delta
+$$
+
+## 4. Market Curves and Coupon Rates
+
+### 4.1 Benchmark Curve
+
+Each scenario has a benchmark forward curve or rate path:
+
+$$
+I_q = \operatorname{IndexRate}(D_{q-1}, D_q)
+$$
+
+Examples include SOFR, Term SOFR, Euribor, SONIA, or a flat academic rate.
+Curve interpolation, compounding conventions, observation shifts, lookbacks,
+fallback rates, and index floors must be configured explicitly.
+
+### 4.2 Asset Coupon
+
+For a floating-rate loan:
+
+$$
+c_{i,q} = \max(I_q, f_i) + s_i
+$$
+
+If an asset is fixed-rate:
+
+$$
+c_{i,q} = c_i^{fixed}
+$$
+
+Asset interest before default adjustments is:
+
+$$
+\operatorname{AssetInterest}_{i,q}
+= \operatorname{PerformingBalance}_{i,q-1}
+  c_{i,q}\Delta_{i,q}
+$$
+
+The engine must support non-cash pay, PIK, delayed-draw, revolving, fixed-rate,
+discount, defaulted, and workout assets through explicit asset type flags.
+
+### 4.3 Note Coupon
+
+For floating-rate liabilities:
+
+$$
+r_{j,q} = I_q + spread_j
+$$
+
+For fixed-rate liabilities:
+
+$$
+r_{j,q} = r_j^{fixed}
+$$
+
+Interest due is:
+
+$$
+I^{due}_{j,q}
+= N_{j,q-1} r_{j,q}\Delta_{j,q}
++ \operatorname{DeferredInterest}_{j,q-1}
++ \operatorname{DefaultedInterestPenalty}_{j,q}
+$$
+
+Interest deferral eligibility is class-specific. Senior classes typically require
+timely interest; junior deferrable notes may carry forward unpaid interest.
+
+## 5. Credit Model
+
+The engine supports deterministic and stochastic credit modes.
+
+### 5.1 Deterministic Default Vectors
+
+Rating-style and scenario runs may provide asset-level or portfolio-level default
+amounts by period. If $CDR_m$ is an annualized conditional default rate and
+$\Delta_m$ is the year fraction for the projection period, convert it to a
+period default rate:
+
+$$
+p_m^{default}=1-(1-CDR_m)^{\Delta_m}
+$$
+
+then:
+
+$$
+\operatorname{DefaultedPar}_{m}
+= \operatorname{PerformingPar}_{m-1} \cdot p_m^{default}
+$$
+
+or explicit asset default dates:
+
+```text
+asset_id | default_date | recovery_rate | recovery_date | sale_price
+```
+
+Deterministic default vectors are required for rating stresses, break-even CDR,
+trustee-report tie-outs, and analyst-defined downside cases.
+
+### 5.2 One-Factor Gaussian Copula
+
+Each obligor has a latent variable:
+
+$$
+Y_i = aM + \sqrt{1-a^2}Z_i
 $$
 
 with:
 
 $$
-M \sim \mathcal{N}(0,1)
+M \sim N(0,1),\qquad Z_i \sim N(0,1)
 $$
 
-$$
-Z_i \sim \mathcal{N}(0,1)
-$$
-
-$$
-M \perp Z_i,\qquad Z_i \perp Z_k \text{ for } i \ne k
-$$
-
-The latent asset correlation between any two names is:
+and:
 
 $$
 \operatorname{Corr}(Y_i,Y_k) = a^2 = \rho
 $$
 
-Therefore, if the target latent asset correlation is $\rho$, the factor loading is:
-
-$$
-a = \sqrt{\rho}
-$$
-
-For the academic correlation of $\rho = 0.20$:
-
-$$
-a = \sqrt{0.20} \approx 0.4472135955
-$$
-
-## 4. Mapping Latent Variables to Default
-
-Let $\Phi$ be the standard normal CDF. Define:
+Define:
 
 $$
 U_i = \Phi(Y_i)
 $$
 
-Then $U_i$ is uniform on $[0,1]$. Name $i$ defaults by time $t$ if:
+Then name $i$ defaults by time $t$ if:
 
 $$
 U_i \le Q_i(t)
@@ -110,97 +255,81 @@ $$
 Equivalently:
 
 $$
-Y_i \le \Phi^{-1}\left(Q_i(t)\right)
+Y_i \le \Phi^{-1}(Q_i(t))
 $$
 
-This preserves the desired marginal default probability:
+### 5.3 Multi-Factor Extension
+
+Institutional portfolios may require industry, region, sponsor, or rating
+factors:
 
 $$
-\mathbb{P}(\text{default by } t)
-= \mathbb{P}\left(U_i \le Q_i(t)\right)
-= Q_i(t)
+Y_i = \sum_{g=1}^{G} a_{i,g}M_g
+      + \sqrt{1-\sum_{g=1}^{G}a_{i,g}^2}Z_i
 $$
 
-## 5. Default-Time Sampling
+with:
 
-Default times are needed because the cash waterfall is quarterly. Given $U_i$, default time is the inverse cumulative default curve:
+$$
+\sum_{g=1}^{G}a_{i,g}^2 \le 1
+$$
+
+The one-factor model remains the default because it is transparent and stable.
+The multi-factor model is optional and must report the full loading matrix.
+
+### 5.4 Default-Time Sampling
+
+Default times are generated by inverse transform:
 
 $$
 \tau_i = Q_i^{-1}(U_i)
 $$
 
-For a constant hazard rate $\lambda_i$:
+For a constant hazard:
 
 $$
 Q_i(t) = 1 - e^{-\lambda_i t}
 $$
 
-Solving for $t$ gives:
+so:
 
 $$
 \tau_i = \frac{-\ln(1-U_i)}{\lambda_i}
 $$
 
-This is the correct orientation. Low latent credit quality gives low $U_i$, which gives early default. The formula $-\ln(U_i)/\lambda_i$ would reverse the ordering and is incorrect for this construction.
+Low latent credit quality gives low $U_i$, which gives early default. The formula
+$-\ln(U_i)/\lambda_i$ is invalid for this construction because it reverses the
+ordering.
 
-Default within horizon $T$ occurs when:
+### 5.5 Piecewise-Constant Hazard Curve
 
-$$
-\tau_i \le T
-$$
-
-which is equivalent to:
+For default tenors:
 
 $$
-U_i \le Q_i(T)
+0=T_0<T_1<\cdots<T_K
 $$
 
-## 6. Default Curves and Hazard Rates
-
-### 6.1 Constant Hazard
-
-If a cumulative default probability $Q(T)$ is supplied for horizon $T$, the flat hazard rate is:
+and cumulative default probabilities $Q(T_k)$:
 
 $$
-\lambda = \frac{-\ln\left(1-Q(T)\right)}{T}
+S(T_k)=1-Q(T_k)
 $$
 
-Then the cumulative curve at any time $t$ is:
-
-$$
-Q(t) = 1 - e^{-\lambda t}
-$$
-
-### 6.2 Piecewise-Constant Hazard
-
-For a default table with cumulative probabilities at tenors:
-
-$$
-0 = T_0 < T_1 < \cdots < T_K
-$$
-
-with cumulative default probabilities $Q(T_k)$, the survival probability is:
-
-$$
-S(T_k) = 1 - Q(T_k)
-$$
-
-The piecewise hazard on interval $(T_{k-1}, T_k]$ is:
+The interval hazard is:
 
 $$
 \lambda_k =
-\frac{-\ln\left(S(T_k) / S(T_{k-1})\right)}
-{T_k - T_{k-1}}
+\frac{-\ln(S(T_k)/S(T_{k-1}))}{T_k-T_{k-1}}
 $$
 
-For $t \in (T_{k-1},T_k]$:
+For $t\in(T_{k-1},T_k]$:
 
 $$
-S(t) = S(T_{k-1})e^{-\lambda_k(t-T_{k-1})}
+S(t)=S(T_{k-1})e^{-\lambda_k(t-T_{k-1})}
 $$
 
 $$
-Q(t) = 1 - S(t)
+Q(t)=1-S(t)
 $$
 
 To invert the curve, find the first interval where:
@@ -214,36 +343,53 @@ then:
 $$
 \tau_i =
 T_{k-1}
-- \frac{\ln\left((1-U_i)/S(T_{k-1})\right)}{\lambda_k}
+- \frac{\ln((1-U_i)/S(T_{k-1}))}{\lambda_k}
 $$
 
 If $U_i > Q(T_K)$, the name survives beyond the last curve tenor.
 
-## 7. Recovery and Loss Given Default
+### 5.6 Rating Migration and Watchlist State
 
-### 7.1 Constant Recovery
+The base model may hold ratings static. The institutional model must support
+optional migration:
 
-The academic baseline uses constant LGD:
+```text
+current_rating -> migrated_rating
+rating_factor(current_rating) -> rating_factor(migrated_rating)
+CCC flag
+default probability curve update
+recovery assumption update
+eligibility impact
+```
+
+Migration can be deterministic by scenario or stochastic using a transition
+matrix. Rating migration affects WARF, CCC excess, default curves, recoveries,
+eligibility, and concentration tests.
+
+## 6. Recovery, Workouts, and Defaulted Assets
+
+### 6.1 Recovery Timing
+
+Recoveries are not immediate unless the deal or scenario explicitly says so. If
+asset $i$ defaults at $\tau_i$, recovery is received at:
 
 $$
-\mathrm{LGD}_i = 60\%
+\operatorname{RecoveryDate}_i = \tau_i + \ell_i
 $$
 
-$$
-R_i = 40\%
-$$
+where $\ell_i$ can be fixed, rating/asset-type specific, scenario-specific, or
+random. Recovery cash is recognized in the first proceeds period containing the
+recovery date.
+
+### 6.2 Recovery Amount
+
+Constant recovery:
 
 $$
-\mathrm{loss}_i = \mathrm{LGD}_i F_i
+\operatorname{RecoveryCash}_i = R_i F_{i,\tau_i}
 $$
 
-$$
-\mathrm{recovery\_cash}_i = R_i F_i
-$$
-
-### 7.2 Stochastic Recovery
-
-The industry option models recovery as beta-distributed:
+Stochastic recovery:
 
 $$
 R_i \sim \operatorname{Beta}(\alpha,\beta)
@@ -252,570 +398,1038 @@ $$
 with:
 
 $$
-\mathbb{E}[R_i] = \frac{\alpha}{\alpha+\beta}
+E[R_i] = \frac{\alpha}{\alpha+\beta}
 $$
 
-$$
-\operatorname{Var}(R_i)
-= \frac{\alpha\beta}{(\alpha+\beta)^2(\alpha+\beta+1)}
-$$
-
-Given target mean $m$ and concentration $\kappa$:
+Given mean $m$ and concentration $\kappa$:
 
 $$
-\alpha = m\kappa
+\alpha=m\kappa,\qquad \beta=(1-m)\kappa
 $$
 
-$$
-\beta = (1-m)\kappa
-$$
-
-Then:
+Optional factor-linked recovery:
 
 $$
-\mathrm{LGD}_i = 1 - R_i
+R_i = \operatorname{clip}(R_i^0 + \gamma M, R_{min}, R_{max})
 $$
 
-$$
-\mathrm{loss}_i = \mathrm{LGD}_i F_i
-$$
+where $\gamma<0$ means recoveries are lower in bad systemic states.
 
-Recovery draws should be seeded and reproducible. A later extension may correlate recovery with the systemic factor $M$, but v1 may keep recovery independent.
+### 6.3 Defaulted Asset Treatment
 
-## 8. Collateral Cash Flows
-
-For each period $q$, the collateral coupon from name $i$ is:
-
-$$
-\operatorname{coupon}_{i,q}
-= \operatorname{alive}_{i,q} c_i F_i \Delta
-$$
-
-where $\operatorname{alive}_{i,q}$ is 1 if name $i$ has not defaulted before the coupon accrual cutoff and 0 otherwise.
-
-Recovery cash in period $q$ is:
-
-$$
-\operatorname{recovery}_{i,q}
-= \mathbf{1}_{\{\tau_i \in q\}} R_i F_i
-$$
-
-Principal at maturity is:
-
-$$
-\operatorname{principal}_{i,q}
-= \mathbf{1}_{\{q=\mathrm{final}\}}\mathbf{1}_{\{\tau_i>T\}}F_i
-$$
-
-Total collateral cash available in period $q$ is:
-
-$$
-C_q =
-\sum_i \operatorname{coupon}_{i,q}
-+ \sum_i \operatorname{recovery}_{i,q}
-+ \sum_i \operatorname{principal}_{i,q}
-$$
-
-Collateral par outstanding after defaults is:
-
-$$
-\operatorname{Par}_q =
-\sum_i \mathbf{1}_{\{\tau_i>t_q\}}F_i
-$$
-
-Collateral interest for coverage tests is usually:
-
-$$
-\operatorname{Interest}_q =
-\sum_i \mathbf{1}_{\{\tau_i>t_{q-1}\}}c_iF_i\Delta
-$$
-
-The exact timing convention must be declared in `DealConfig`.
-
-## 9. Simple Waterfall
-
-The academic baseline waterfall pays:
-
-1. Class A interest
-2. Class B interest
-3. Residual to equity
-
-For tranche $j$, interest due in period $q$ is:
-
-$$
-I_{j,q}
-= r_j N_{j,q-1}\Delta
-+ \operatorname{carried\_shortfall}_{j,q-1}
-$$
-
-Payment is:
-
-$$
-P_{j,q}^{\mathrm{interest}}
-= \min\left(\operatorname{available\_cash}, I_{j,q}\right)
-$$
-
-Unpaid interest shortfall is:
-
-$$
-\operatorname{shortfall}_{j,q}
-= I_{j,q} - P_{j,q}^{\mathrm{interest}}
-$$
-
-Remaining cash after debt interest goes to equity:
-
-$$
-\operatorname{Equity}_q
-= \max\left(\operatorname{available\_cash\_after\_debt\_interest}, 0\right)
-$$
-
-In the academic baseline, tranche principal repayment and loss allocation are measured through end-of-horizon collateral losses. In the industry cash-flow version, principal paydowns and writedowns are tracked directly through the waterfall.
-
-## 10. OC and IC Tests
-
-### 10.1 Overcollateralization Test
-
-For senior tranche A:
-
-$$
-\operatorname{OC}_q
-= \frac{\operatorname{collateral\_par}_q}
-{\operatorname{senior\_notional\_outstanding}_q}
-$$
-
-The test passes if:
-
-$$
-\operatorname{OC}_q \ge \operatorname{OC}_{\mathrm{trigger}}
-$$
-
-If the test fails, residual cash that would otherwise go to mezzanine/equity may be diverted to pay down senior principal until the test is cured or cash is exhausted.
-
-### 10.2 Interest Coverage Test
-
-$$
-\operatorname{IC}_q
-= \frac{\operatorname{collateral\_interest}_q}
-{\operatorname{senior\_interest\_due}_q}
-$$
-
-The test passes if:
-
-$$
-\operatorname{IC}_q \ge \operatorname{IC}_{\mathrm{trigger}}
-$$
-
-If the test fails, available residual cash is diverted to senior deleveraging, subject to the deal's priority of payments.
-
-### 10.3 Diversion Amount
-
-A simple v1 diversion rule is:
-
-$$
-\operatorname{diversion}_q
-= \operatorname{available\_cash\_after\_senior\_interest}
-$$
-
-when either OC or IC fails. Senior principal paydown is:
-
-$$
-\operatorname{paydown}_{A,q}
-= \min\left(\operatorname{diversion}_q, N_{A,q-1}\right)
-$$
-
-$$
-N_{A,q} = N_{A,q-1} - \operatorname{paydown}_{A,q}
-$$
-
-Real deal documents can define different cure mechanics. The chosen convention must be explicit.
-
-## 11. Tranche Loss Allocation
-
-Let total portfolio loss at horizon be:
-
-$$
-L = \sum_i \mathbf{1}_{\{\tau_i \le T\}}\mathrm{LGD}_iF_i
-$$
-
-For an attachment point $A_j$ and detachment point $D_j$, tranche loss is:
-
-$$
-\operatorname{TL}_j
-= \min\left(\max(L-A_j,0),D_j-A_j\right)
-$$
-
-As a percentage of tranche notional:
-
-$$
-\operatorname{tl}_j
-= \frac{\operatorname{TL}_j}{D_j-A_j}
-$$
-
-For named tranche notionals in the academic structure, losses are allocated in reverse seniority:
+Defaulted assets must track:
 
 ```text
-equity absorbs first
-then Class B
-then Class A
+defaulted_par
+market_value
+expected_recovery
+recovery_date
+workout_sale_date
+workout_interest
+par haircut
+eligibility status
+proceeds bucket
 ```
 
-If the capital structure has:
+Defaulted assets usually stop paying regular interest. Any recoveries, sale
+proceeds, or workout proceeds must be classified according to the deal's
+definitions of interest proceeds and principal proceeds.
+
+## 7. Collateral Cash-Flow Engine
+
+For each asset and collateral projection period, the engine computes:
+
+```text
+beginning par
+fundings / delayed-draw advances
+scheduled amortization
+prepayments / repayments
+sales
+purchases
+defaults
+recoveries
+ending par
+performing par
+defaulted par
+interest proceeds
+principal proceeds
+trading gain/loss
+```
+
+### 7.1 Performing Interest
 
 $$
-N_E = \text{equity notional},\qquad
-N_B = \text{Class B notional},\qquad
-N_A = \text{Class A notional}
+Interest_{i,m}
+= PerformingBalance_{i,m-1} \cdot c_{i,m}\cdot \Delta_{i,m}
 $$
 
-then:
+If interest is paid with a delay or settlement lag:
 
 $$
-\operatorname{Loss}_E = \min(L,N_E)
+ReceiptDate_{i,m}=AccrualEndDate_m+\operatorname{SettlementLag}_i
 $$
 
-$$
-\operatorname{Loss}_B = \min\left(\max(L-N_E,0),N_B\right)
-$$
+### 7.2 Scheduled Principal
+
+For amortizing assets:
 
 $$
-\operatorname{Loss}_A =
-\min\left(\max(L-N_E-N_B,0),N_A\right)
+ScheduledPrincipal_{i,m}
+= \min(ScheduleAmount_{i,m}, UPB_{i,m-1})
 $$
 
-## 12. Tranche Metrics
-
-For $S$ Monte Carlo scenarios and tranche $j$, define scenario loss $\operatorname{Loss}_{j,s}$.
-
-Expected loss is:
+For bullet assets:
 
 $$
-\operatorname{EL}_j
-= \frac{1}{S}\sum_{s=1}^{S}
-\frac{\operatorname{Loss}_{j,s}}{N_j}
+ScheduledPrincipal_{i,m}
+= \mathbf{1}_{\{maturity_i \in m\}}UPB_{i,m-1}
 $$
 
-Probability of any principal loss is:
+### 7.3 Prepayments and Repayments
+
+For a conditional prepayment rate $CPR_m$:
 
 $$
-\operatorname{PD}_j
-= \frac{1}{S}\sum_{s=1}^{S}
-\mathbf{1}_{\{\operatorname{Loss}_{j,s}>0\}}
+SMM_m = 1-(1-CPR_m)^{1/12}
 $$
 
-Mean loss amount is:
+Monthly prepayment is:
 
 $$
-\operatorname{MeanLoss}_j
-= \frac{1}{S}\sum_{s=1}^{S}\operatorname{Loss}_{j,s}
+Prepay_{i,m}
+= (UPB_{i,m-1}-ScheduledPrincipal_{i,m})SMM_m
 $$
 
-Loss standard error is:
+Loan-specific repayment dates override vector assumptions.
+
+### 7.4 Sales
+
+If an asset is sold:
 
 $$
-\operatorname{SE}(\operatorname{MeanLoss}_j)
-= \frac{\operatorname{sample\_std}(\operatorname{Loss}_{j,s})}{\sqrt{S}}
+SaleProceeds_{i,m}=SoldPar_{i,m}\cdot S_{i,m}
 $$
 
-For expected loss percentage:
+Trading gain/loss relative to par is:
 
 $$
-\operatorname{SE}(\operatorname{EL}_j)
-= \frac{\operatorname{SE}(\operatorname{MeanLoss}_j)}{N_j}
+TradingPnL_{i,m}=SaleProceeds_{i,m}-SoldPar_{i,m}
 $$
 
-A normal-approximate 95% confidence interval is:
+The model must preserve both cash proceeds and par impact, because OC tests may
+use adjusted par while valuation uses market value.
+
+### 7.5 Purchases and Reinvestment Assets
+
+If principal proceeds are reinvested at purchase price $P_{new,m}$:
 
 $$
-\operatorname{EL}_j
-\pm 1.96\,\operatorname{SE}(\operatorname{EL}_j)
+PurchasedPar_m =
+\frac{CashUsedForPurchases_m}{P_{new,m}}
 $$
 
-For low-probability senior losses, the engine should report the number of loss scenarios and warn when tail estimates are based on very few observations.
+New assets inherit scenario-defined or sampled attributes:
 
-## 13. Valuation
+```text
+spread
+floor
+rating
+rating factor
+industry
+country
+maturity
+recovery assumption
+price
+eligibility flags
+default curve
+prepayment vector
+```
 
-For tranche $j$, scenario cash flows are $\operatorname{CF}_{j,q,s}$. Discount factor for period $q$ is $\operatorname{DF}_j(t_q)$.
+Purchases are subject to eligibility, concentration, quality, maturity, WAL, WAS,
+WARF, CCC, cov-lite, fixed-rate, discount-obligation, and reinvestment OC tests.
 
-Scenario present value:
+### 7.6 Collateral Balance Roll-Forward
 
-$$
-\operatorname{PV}_{j,s}
-= \sum_q \operatorname{CF}_{j,q,s}\operatorname{DF}_j(t_q)
-$$
-
-Tranche value:
-
-$$
-\operatorname{Value}_j
-= \frac{1}{S}\sum_{s=1}^{S}\operatorname{PV}_{j,s}
-$$
-
-If using a flat discount rate $d_j$:
-
-$$
-\operatorname{DF}_j(t_q) = e^{-d_jt_q}
-$$
-
-or, with periodic compounding:
+For each period:
 
 $$
-\operatorname{DF}_j(t_q)
-= \frac{1}{(1+d_j\Delta)^q}
+Par_{m}
+= Par_{m-1}
++ Purchases_m
++ Fundings_m
+- ScheduledPrincipal_m
+- Prepayments_m
+- SoldPar_m
+- DefaultedPar_m
 $$
 
-The convention must be explicit. The design target is:
+This identity is a hard validation check.
+
+## 8. Proceeds Accounts
+
+The engine maintains explicit accounts:
+
+```text
+interest_proceeds
+principal_proceeds
+collection_account
+payment_account
+expense_reserve
+interest_reserve
+principal_reserve
+supplemental_reserve
+uninvested_cash
+```
+
+A transaction-specific mapping classifies each cash item:
+
+| Cash item | Typical bucket |
+|---|---|
+| Performing loan interest | Interest proceeds |
+| Commitment fees | Interest or other proceeds, deal-specific |
+| Scheduled principal | Principal proceeds |
+| Prepayments/repayments | Principal proceeds |
+| Sale proceeds | Principal proceeds, with deal-specific gain treatment |
+| Recoveries | Principal proceeds unless documents say otherwise |
+| Workout interest | Interest or principal proceeds, deal-specific |
+| Hedge receipts | Interest proceeds or hedge account |
+| Reserve releases | Deal-specific |
+
+Permitted transfers between accounts must be explicit. The model may not use
+principal to pay interest, or interest to buy collateral, unless the deal terms
+allow it.
+
+## 9. Fees, Expenses, Taxes, and Hedges
+
+The liability engine computes senior expenses, trustee/admin fees, collateral
+manager fees, incentive fees, taxes, hedge payments, and reserve deposits.
+
+Example management fee:
 
 $$
-d_A = r_{\mathrm{risk\ free}} + 50\text{ bp}
+MgmtFee_{q}^{senior}
+= FeeRate^{senior}\cdot FeeBase_q\cdot \Delta_q
++ UnpaidSeniorMgmtFee_{q-1}
 $$
 
+Fee bases may be:
+
+```text
+aggregate collateral balance
+performing collateral balance
+adjusted collateral principal amount
+original collateral balance
+note balance
+```
+
+Caps, carryforward, subordination, incentive hurdles, and fee-waiver mechanics
+must be line-item configuration, not hard-coded assumptions.
+
+Hedge cash flows must support:
+
+```text
+fixed-floating swaps
+basis swaps
+caps/floors
+termination payments
+counterparty downgrade/reserve triggers
+```
+
+## 10. Liability and Note Balance Engine
+
+For each tranche:
+
+```text
+beginning balance
+interest due
+interest paid
+deferred interest
+interest shortfall
+principal paid
+writedown
+writeup
+ending balance
+controlling class status
+timely interest flag
+ultimate principal flag
+```
+
+The note balance roll-forward is:
+
 $$
-d_B = r_{\mathrm{Treasury}} + 400\text{ bp}
+N_{j,q}
+= N_{j,q-1}
+- PrincipalPaid_{j,q}
+- Writedown_{j,q}
++ Writeup_{j,q}
 $$
 
-Equity value is the discounted value of residual cash flows, plus reported IRR.
+No note balance may become negative. No principal payment may exceed outstanding
+balance. Interest shortfall treatment is tranche-specific.
 
-## 14. Equity ROE and IRR
+## 11. Collateral Quality and Concentration Tests
 
-Let the retained equity investment be $E_0$. Let expected equity cash flow at period $q$ be:
+The institutional model computes collateral-quality tests before waterfalls and
+before reinvestment eligibility decisions.
 
-$$
-\operatorname{ECF}_q
-= \frac{1}{S}\sum_{s=1}^{S}\operatorname{CF}_{\mathrm{equity},q,s}
-$$
+### 11.1 WARF
 
-Simple total return is:
-
-$$
-\operatorname{TotalReturn}
-= \frac{\sum_q \operatorname{ECF}_q - E_0}{E_0}
-$$
-
-ROE may be reported as:
+Given rating factor $RF_i$:
 
 $$
-\operatorname{ROE}
-= \frac{\sum_q \operatorname{ECF}_q}{E_0}
+WARF_q =
+\frac{\sum_i EligiblePar_{i,q}RF_{i,q}}
+     {\sum_i EligiblePar_{i,q}}
 $$
 
-or as net return:
+The test passes if:
 
 $$
-\operatorname{NetROE}
-= \frac{\sum_q \operatorname{ECF}_q - E_0}{E_0}
+WARF_q \le WARF_{max}
 $$
 
-The report must label which one is used.
+### 11.2 Weighted-Average Spread
+
+$$
+WAS_q =
+\frac{\sum_i EligiblePar_{i,q}s_i}
+     {\sum_i EligiblePar_{i,q}}
+$$
+
+The test passes if:
+
+$$
+WAS_q \ge WAS_{min}
+$$
+
+### 11.3 Weighted-Average Life
+
+For asset principal payments $Prin_{i,u}$ at future dates $u$:
+
+$$
+WAL^{asset}_q =
+\frac{\sum_{i,u}(t_u-t_q)Prin_{i,u}}
+     {\sum_{i,u}Prin_{i,u}}
+$$
+
+The test passes if:
+
+$$
+WAL^{asset}_q \le WAL_{max}(q)
+$$
+
+### 11.4 Diversity and Concentration
+
+The model must support at least these concentration tests:
+
+```text
+largest obligor
+top 5 obligors
+industry
+country
+rating bucket
+CCC/Caa excess
+cov-lite
+fixed-rate assets
+second-lien assets
+unsecured assets
+discount obligations
+long-dated assets
+non-performing/defaulted assets
+non-senior-secured assets
+```
+
+Test formulas are configured because deal documents differ. Results must report:
+
+```text
+test name
+threshold
+numerator
+denominator
+excess amount
+pass/fail
+impacted waterfall or reinvestment rule
+```
+
+## 12. Adjusted Collateral Principal Amount
+
+OC tests usually use an adjusted collateral balance rather than raw par.
+
+Generic form:
+
+$$
+ACPA_q =
+PerformingPar_q
+- Haircut^{defaulted}_q
+- Haircut^{CCCExcess}_q
+- Haircut^{discount}_q
+- Haircut^{longdated}_q
+- Haircut^{ineligible}_q
++ EligibleCash_q
+$$
+
+The engine must store each component separately.
+
+Example defaulted asset haircut:
+
+$$
+Haircut^{defaulted}_{i,q}
+= DefaultedPar_{i,q}
+- \min(MV_{i,q}, RecoveryValue_{i,q}, Par_{i,q})
+$$
+
+Example discount obligation haircut:
+
+$$
+Haircut^{discount}_{i,q}
+= \max(0, Par_{i,q}-PurchasePrice_{i,q}Par_{i,q})
+$$
+
+The actual formula is deal-specific and must be loaded from `TestConfig`.
+
+## 13. OC and IC Coverage Tests
+
+Coverage tests are class-specific. For a test class $k$, define the included note
+set:
+
+$$
+\mathcal{J}_{\le k} = \{j: seniority_j \le seniority_k\}
+$$
+
+### 13.1 Overcollateralization
+
+$$
+OC_{k,q}
+= \frac{ACPA_q}
+       {\sum_{j\in\mathcal{J}_{\le k}}N_{j,q-1}}
+$$
+
+The test passes if:
+
+$$
+OC_{k,q} \ge OCTrigger_{k,q}
+$$
+
+If the denominator is zero because every included class has been paid in full,
+the test status is `not_applicable_paid_off` unless the deal documents specify a
+different residual test.
+
+### 13.2 Interest Coverage
+
+$$
+IC_{k,q}
+= \frac{InterestProceedsForTest_{k,q}}
+       {\sum_{j\in\mathcal{J}_{\le k}}I^{due}_{j,q}}
+$$
+
+The test passes if:
+
+$$
+IC_{k,q} \ge ICTrigger_{k,q}
+$$
+
+If the denominator is zero because no included class has interest due, the test
+status is `not_applicable_no_interest_due` unless the deal documents specify a
+different treatment.
+
+### 13.3 Reinvestment OC
+
+Some deals apply a reinvestment OC or par-value test to determine whether
+principal may be reinvested:
+
+$$
+ReinvOC_q =
+\frac{ACPA_q + EligiblePrincipalCash_q}
+     {TargetParOrRatedDebt_q}
+$$
+
+If the test fails, principal proceeds that otherwise would be reinvested are used
+to pay down notes according to the principal waterfall.
+
+## 14. Waterfall Engine
+
+The model supports multiple waterfalls:
+
+```text
+interest proceeds waterfall
+principal proceeds waterfall
+post-reinvestment principal waterfall
+coverage-test diversion waterfall
+optional redemption waterfall
+acceleration/enforcement waterfall
+special proceeds/workout waterfall
+hedge termination waterfall
+```
+
+Each waterfall is represented as ordered line items:
+
+```text
+line_id
+source_account
+target_account_or_payee
+amount_due_formula
+cap_formula
+shortfall_rule
+carryforward_rule
+skip_condition
+test_condition
+balance_update
+```
+
+### 14.1 Generic Payment Operator
+
+For line item $\ell$:
+
+$$
+Paid_{\ell,q}
+= \min(Available_{\ell,q}, Due_{\ell,q}, Cap_{\ell,q})
+$$
+
+Shortfall:
+
+$$
+Shortfall_{\ell,q}
+= Due_{\ell,q} - Paid_{\ell,q}
+$$
+
+Available cash after payment:
+
+$$
+Available_{\ell+1,q}
+= Available_{\ell,q} - Paid_{\ell,q}
+$$
+
+Every line item must preserve a source/use audit record.
+
+### 14.2 Interest Proceeds Waterfall
+
+A typical configurable order:
+
+```text
+1. taxes and senior expenses
+2. trustee/admin/capped expenses
+3. hedge payments senior in the waterfall
+4. senior management fee
+5. Class A interest
+6. Class B interest
+7. Class C interest
+8. Class D interest
+9. Class E/F interest, including deferrable treatment
+10. coverage-test diversion to principal paydown if applicable
+11. subordinated management fee
+12. deferred interest and interest-on-interest, if applicable
+13. incentive management fee
+14. reserve deposits or releases
+15. residual to subordinated notes/equity
+```
+
+The exact order is deal-specific.
+
+### 14.3 Principal Proceeds Waterfall
+
+During the reinvestment period:
+
+```text
+1. purchase eligible collateral if reinvestment is allowed
+2. cure coverage-test failures if required
+3. pay required principal on notes if reinvestment is not allowed
+4. deposit to principal or ramp-up accounts if required
+5. residual principal treatment, if any
+```
+
+After the reinvestment period:
+
+```text
+1. pay Class A principal until zero
+2. pay Class B principal until zero
+3. pay Class C principal until zero
+4. pay Class D principal until zero
+5. pay Class E/F principal until zero
+6. residual principal to subordinated notes/equity if permitted
+```
+
+Sequential, pro rata, modified pro rata, turbo, target amortization, and
+controlling-class paydown rules must be supported as configurable modes.
+
+### 14.4 Coverage-Test Diversion
+
+If any applicable OC/IC test fails, the model identifies the controlling failed
+test and the amount otherwise payable to junior notes, fees, or equity that must
+be redirected:
+
+$$
+Diversion_q =
+\min(AvailableAfterProtectedLines_q,\ RequiredCureAmount_q)
+$$
+
+If documents say "divert all remaining proceeds until cured":
+
+$$
+Diversion_q = AvailableAfterProtectedLines_q
+$$
+
+Principal paydown from diverted interest follows the configured cure waterfall.
+
+### 14.5 Cure Amount
+
+A generic OC cure amount for class $k$ is the senior debt reduction $x$ needed
+to restore the ratio:
+
+$$
+\frac{ACPA_q}{Debt_{\le k,q}-x} \ge OCTrigger_{k,q}
+$$
+
+so:
+
+$$
+x \ge Debt_{\le k,q} - \frac{ACPA_q}{OCTrigger_{k,q}}
+$$
+
+The implemented cure amount is:
+
+$$
+CureAmount_{k,q}
+= \max\left(0,\ Debt_{\le k,q} - \frac{ACPA_q}{OCTrigger_{k,q}}\right)
+$$
+
+bounded by outstanding debt and available divertible cash. Deal documents may
+instead require all remaining interest to be paid as principal regardless of this
+calculated amount.
+
+## 15. Reinvestment and Trading Rules
+
+Reinvestment is allowed only if:
+
+```text
+current date is within reinvestment period
+no event of default or acceleration blocks reinvestment
+coverage tests satisfy required levels or cure provisions
+reinvestment OC/par tests pass
+collateral-quality tests pass before and after purchase
+concentration tests pass or purchases improve compliance
+asset eligibility criteria are met
+manager trading limits are not exceeded
+```
+
+If reinvestment is blocked, eligible principal proceeds follow the principal
+waterfall.
+
+The model must support:
+
+```text
+ramp-up purchases
+scheduled reinvestment
+unscheduled reinvestment
+credit risk sales
+credit improved sales
+discretionary sales
+substitution
+reinvestment at premium or discount
+par build and par erosion
+```
+
+Each trade must produce:
+
+```text
+cash impact
+par impact
+gain/loss versus par
+market-value impact
+test impact
+eligibility impact
+```
+
+## 16. Valuation
+
+### 16.1 Scenario Present Value
+
+For tranche $j$ and scenario $s$:
+
+$$
+PV_{j,s}
+= \sum_q CF_{j,q,s}DF_j(t_q)
+$$
+
+Expected value:
+
+$$
+Value_j = \frac{1}{S}\sum_{s=1}^{S}PV_{j,s}
+$$
+
+### 16.2 Discount Curves
+
+The model supports:
+
+```text
+risk-free curve
+benchmark forward curve
+discount-margin curve
+OAS curve
+tranche-specific required yield
+market price implied yield
+```
+
+Flat discounting is allowed only as an explicit simplified mode:
+
+$$
+DF_j(t_q)=e^{-d_jt_q}
+$$
+
+or:
+
+$$
+DF_j(t_q)=\frac{1}{(1+d_j\Delta_q)^q}
+$$
+
+### 16.3 Price, Yield, DM, and OAS
+
+Given a clean price $Price_j$, solve yield $y_j$:
+
+$$
+Price_j + Accrued_j =
+\sum_q \frac{ExpectedCF_{j,q}}{(1+y_j\Delta_q)^{n_q}}
+$$
+
+Discount margin $DM_j$ solves:
+
+$$
+Price_j + Accrued_j =
+\sum_q ExpectedCF_{j,q} \cdot DF^{benchmark+DM_j}(t_q)
+$$
+
+OAS solves the analogous spread over the risk-neutral or scenario-adjusted curve.
+All reported valuation outputs must state whether cash flows are deterministic,
+expected under Monte Carlo, rating-stress cash flows, or trustee-report actuals.
+
+## 17. Tranche Metrics
+
+For $S$ scenarios and tranche $j$:
+
+$$
+EL_j =
+\frac{1}{S}\sum_{s=1}^{S}\frac{Loss_{j,s}}{N_{j,0}}
+$$
+
+Probability of principal loss:
+
+$$
+PPL_j =
+\frac{1}{S}\sum_{s=1}^{S}\mathbf{1}_{\{Loss_{j,s}>0\}}
+$$
+
+Probability of interest shortfall:
+
+$$
+PIS_j =
+\frac{1}{S}\sum_{s=1}^{S}\mathbf{1}_{\{\exists q: Shortfall_{j,q,s}>0\}}
+$$
+
+Probability of impairment:
+
+$$
+PI_j =
+\frac{1}{S}\sum_{s=1}^{S}
+\mathbf{1}_{\{PrincipalPaid_{j,s}+EndingBalance_{j,s}<N_{j,0}\}}
+$$
+
+Weighted-average life:
+
+$$
+WAL_j =
+\frac{\sum_q t_q \cdot PrincipalPaid_{j,q}}
+     {\sum_q PrincipalPaid_{j,q}}
+$$
+
+If principal is not fully repaid in some scenarios, report WAL conditional on
+full repayment and separately report impairment frequency.
+
+## 18. Equity Metrics
+
+Let $E_0$ be equity purchase price or retained equity investment. Expected equity
+cash flow is:
+
+$$
+ECF_q = \frac{1}{S}\sum_{s=1}^{S}CF_{equity,q,s}
+$$
+
+Net total return:
+
+$$
+NetReturn =
+\frac{\sum_q ECF_q - E_0}{E_0}
+$$
+
+Multiple on invested capital:
+
+$$
+MOIC =
+\frac{\sum_q ECF_q}{E_0}
+$$
 
 IRR solves:
 
 $$
-0 = -E_0 + \sum_q \frac{\operatorname{ECF}_q}{(1+\operatorname{IRR})^{t_q}}
+0 = -E_0 + \sum_q \frac{ECF_q}{(1+IRR)^{t_q}}
 $$
 
-If cash flows have multiple sign changes, IRR may be unstable; in that case report NPV at a chosen discount rate as the primary measure.
+If cash flows have multiple sign changes, report NPV and MIRR in addition to, or
+instead of, IRR.
 
-## 15. Academic Rating Mode
+## 19. Rating and Stress Analysis Modes
 
-The academic rating mode solves for the largest Class A notional such that expected loss remains below the assigned threshold.
+The engine has four non-proprietary modes.
 
-Let the threshold for Aa be:
+### 19.1 Academic Rating Mode
 
-$$
-\theta_{\mathrm{Aa}}
-$$
-
-The condition is:
+Solve for the largest Class A notional such that expected loss is below the
+assigned academic threshold:
 
 $$
-\operatorname{EL}_A(N_A) \le \theta_{\mathrm{Aa}}
+EL_A(N_A) \le \theta_{Aa}
 $$
 
-The solver searches over $N_A$:
+Use common random numbers across the bisection grid to reduce simulation noise.
+
+### 19.2 Deterministic Rating-Style Stress Mode
+
+Run specified combinations of:
 
 ```text
-low = 0
-high = collateral_notional
-while high - low > tolerance:
-    mid = (low + high) / 2
-    run simulation with N_A = mid
-    if EL_A(mid) <= theta_Aa:
-        low = mid
-    else:
-        high = mid
+default rate vector
+default timing vector
+recovery rate
+recovery lag
+interest-rate path
+spread path
+prepayment path
+reinvestment price/spread/rating
+manager trading behavior
+expense stress
+haircut assumptions
 ```
 
-The result is:
+Outputs are pass/fail and cash-flow sufficiency diagnostics, not agency ratings.
 
-$$
-N_A^* = \operatorname{low}
-$$
+### 19.3 Monte Carlo Risk Mode
 
-Because simulation noise can move the boundary, the production solver should either use common random numbers across bisection steps or use a sufficiently large scenario count with confidence intervals.
-
-## 16. Agency-Style Approximation
-
-The agency-style mode does not claim to reproduce proprietary Moody's or S&P criteria. It reports a transparent set of diagnostics:
+Use stochastic default, recovery, prepayment, spread, and rate scenarios to
+estimate distributions of:
 
 ```text
-expected loss
-probability of impairment
-probability of principal loss
-weighted-average life
-stress expected loss
-stress probability of loss
-coverage-test breach frequency
-interest shortfall frequency
+tranche loss
+interest shortfall
+PV
+yield
+WAL
+coverage-test breaches
+equity IRR
 ```
 
-Weighted-average life for tranche $j$ is:
+### 19.4 Break-Even Mode
 
-$$
-\operatorname{WAL}_j
-= \frac{\sum_q t_q \operatorname{principal\_payment}_{j,q}}
-{\sum_q \operatorname{principal\_payment}_{j,q}}
-$$
+Solve for the stress level at which a target tranche first fails a criterion:
 
-If principal is not fully repaid in some scenarios, report WAL conditional on repayment and separately report impairment frequency.
+```text
+break-even CDR
+break-even cumulative default rate
+break-even recovery
+break-even spread compression
+break-even prepayment speed
+break-even reinvestment price
+```
 
-## 17. Monte Carlo Standard Error and Reproducibility
+The criterion can be no principal loss, timely interest, ultimate interest, a
+target EL, or a minimum value/yield.
+
+## 20. Monte Carlo Error and Reproducibility
 
 Every simulation result must include:
 
 ```text
 seed
+random number generator
 n_scenarios
+scenario mode
 mean
-standard_error
-confidence_interval
+sample standard deviation
+standard error
+confidence interval
+number of tail observations
+convergence diagnostics
 ```
 
 For independent scenarios:
 
 $$
-\operatorname{SE}(\bar{X})
-= \frac{\operatorname{sample\_std}(X)}{\sqrt{S}}
+SE(\bar{X})=\frac{sample\_std(X)}{\sqrt{S}}
 $$
 
-Convergence should be checked by running increasing scenario counts:
+The engine must warn when senior-tranche tail metrics rely on too few loss
+observations. Required convergence grid:
 
 $$
-S \in \{1{,}000,\ 5{,}000,\ 10{,}000,\ 50{,}000\}
+S \in \{1{,}000,\ 5{,}000,\ 10{,}000,\ 50{,}000,\ 100{,}000\}
 $$
 
-Standard errors should shrink approximately as:
+## 21. Validation Identities
+
+### 21.1 Credit Model
+
+Latent correlation:
 
 $$
-\operatorname{SE}_S \propto \frac{1}{\sqrt{S}}
+\operatorname{Corr}(Y_i,Y_k)\to\rho
 $$
 
-## 18. Validation Identities
-
-### 18.1 Latent Correlation
-
-Across simulated scenarios:
+Marginal default frequency:
 
 $$
-\operatorname{Corr}(Y_i,Y_k) \to \rho
+\frac{1}{S}\sum_s\mathbf{1}_{\{\tau_{i,s}\le t\}}\to Q_i(t)
 $$
 
-This validates the Gaussian copula construction.
-
-### 18.2 Marginal Default Frequency
-
-For each name and horizon:
+Joint default probability for equal threshold $c=\Phi^{-1}(Q(t))$:
 
 $$
-\frac{1}{S}\sum_{s=1}^{S}\mathbf{1}_{\{\tau_{i,s}\le t\}}
-\to Q_i(t)
+P(default_i,default_k)=\Phi_2(c,c;\rho)
 $$
 
-### 18.3 Joint Default Probability
-
-For two names with identical default threshold:
-
-$$
-c = \Phi^{-1}(Q(t))
-$$
-
-the joint default probability is:
-
-$$
-\mathbb{P}(\text{default}_i,\text{ default}_k)
-= \Phi_2(c,c;\rho)
-$$
-
-where $\Phi_2$ is the bivariate normal CDF with correlation $\rho$.
-
-The default-event correlation is:
+Default-event correlation:
 
 $$
 \operatorname{Corr}(\mathbf{1}_i,\mathbf{1}_k)
 =
-\frac{\Phi_2(c,c;\rho)-Q(t)^2}
-{Q(t)(1-Q(t))}
+\frac{\Phi_2(c,c;\rho)-Q(t)^2}{Q(t)(1-Q(t))}
 $$
 
-This is not equal to latent correlation $\rho$ except in special cases.
+This is not equal to latent correlation except in special cases.
 
-### 18.4 Edge Cases
+### 21.2 Collateral Roll-Forward
+
+$$
+BeginningPar + Purchases + Fundings
+- ScheduledPrincipal - Prepayments - Sales - Defaults
+= EndingPar
+$$
+
+### 21.3 Liability Roll-Forward
+
+$$
+BeginningNoteBalance - PrincipalPaid - Writedown + Writeup
+= EndingNoteBalance
+$$
+
+### 21.4 Cash Source/Use
+
+For each proceeds account:
+
+$$
+BeginningCash + Sources - Uses = EndingCash
+$$
+
+No waterfall line may make available cash negative unless the deal explicitly
+permits overdraft or liquidity draws and those draws are modeled.
+
+### 21.5 Edge Cases
 
 The engine must pass:
 
-$$
-Q(t)=0 \quad \Rightarrow \quad \text{no defaults}
-$$
+```text
+Q(t)=0 -> no defaults
+Q(t)=1 and R=0 -> deterministic full collateral loss
+rho=0 -> independent defaults
+single-name portfolio -> exact Bernoulli loss distribution
+LGD=0 -> no principal losses
+zero note coupon -> no interest due
+no collateral principal -> no principal paydown
+all notes paid -> residual principal follows deal terms
+failed OC test -> configured diversion occurs before residual equity
+reinvestment disabled -> principal pays down notes after required uses
+```
 
-$$
-Q(t)=1,\ R=0 \quad \Rightarrow \quad \text{full deterministic collateral loss}
-$$
+## 22. Required Output Tables
 
-$$
-\rho=0 \quad \Rightarrow \quad \text{independent defaults}
-$$
+The engine returns typed results equivalent to these tables.
 
-$$
-\text{single-name portfolio} \quad \Rightarrow \quad \text{exact Bernoulli loss distribution}
-$$
+### 22.1 Asset Period Cash Flows
 
-$$
-\mathrm{LGD}=0 \quad \Rightarrow \quad \text{no principal losses}
-$$
+```text
+scenario | period | asset_id | beginning_par | interest | scheduled_principal
+prepayment | sale_par | sale_proceeds | defaulted_par | recovery | purchase_par
+ending_par | performing_par | defaulted_par_outstanding | proceeds_bucket
+```
 
-## 19. Implementation Boundary
+### 22.2 Coverage Tests
+
+```text
+scenario | payment_date | test_name | class | numerator | denominator
+threshold | ratio | excess_or_shortfall | pass_fail | cure_amount
+```
+
+### 22.3 Waterfall Trace
+
+```text
+scenario | payment_date | waterfall | line_id | line_name | source_account
+amount_due | amount_paid | shortfall | carryforward | available_after
+balance_update | trigger_reference
+```
+
+### 22.4 Tranche Cash Flows
+
+```text
+scenario | payment_date | tranche | beginning_balance | interest_due
+interest_paid | deferred_interest | principal_paid | writedown | writeup
+ending_balance | cash_flow_to_investor
+```
+
+### 22.5 Valuation and Risk Metrics
+
+```text
+scenario_set | tranche | price | value | yield | discount_margin | OAS
+EL | PPL | PIS | PI | WAL | duration | IRR | standard_error
+confidence_interval | n_scenarios | seed
+```
+
+## 23. Implementation Boundary
 
 The engine computes:
 
 ```text
-default times
-recoveries
-collateral cash flows
-waterfall traces
-tranche metrics
-valuation
-rating diagnostics
+default times and deterministic default vectors
+recoveries and recovery lags
+asset-level collateral cash flows
+proceeds account classification
+fees, expenses, hedges, and reserves
+coverage and collateral-quality tests
+interest and principal waterfalls
+reinvestment and trading eligibility
+tranche cash flows, losses, balances, and shortfalls
+valuation, yield, DM/OAS, WAL, IRR, and risk metrics
+validation reconciliations
 ```
 
 The agent may:
 
 ```text
 parse deal terms
-fetch default-rate tables
-select the correct horizon
+fetch and normalize collateral tapes
+fetch curves, prices, ratings, and default tables
+select scenario sets
 call deterministic solvers
-run stress scenarios
-write reports
-explain outputs
+run stress and break-even workflows
+write reports and explain outputs
 ```
 
 The agent must not:
 
 ```text
 sample defaults
-apply the waterfall
+apply waterfalls
 calculate tranche losses
 discount cash flows
+classify proceeds without the configured mapping
 assign numeric ratings directly
+override failed validations
 ```
 
-All reported numbers must be traceable to typed engine results.
+All reported numbers must be traceable to typed engine results, input data
+versions, scenario definitions, market-data timestamps, and model version.
